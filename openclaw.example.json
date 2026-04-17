@@ -1,0 +1,109 @@
+{
+  "gateway": {
+    "mode": "local",
+    "port": 18789
+  },
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "databricks": {
+        "baseUrl": "https://<YOUR_WORKSPACE>.<region>.ai-gateway.azuredatabricks.net/mlflow/v1",
+        "apiKey": "<DATABRICKS_PAT>",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "databricks-claude-opus-4-7",
+            "name": "Claude Opus 4.7 (primary)",
+            "contextWindow": 200000,
+            "maxTokens": 8192,
+            "input": ["text", "image"],
+            "compat": {
+              "supportsTools": true,
+              "supportsStrictMode": false,
+              "supportsStore": false,
+              "supportsPromptCacheKey": false,
+              "supportsDeveloperRole": false,
+              "supportsReasoningEffort": false,
+              "supportsUsageInStreaming": false
+            }
+          },
+          {
+            "id": "databricks-claude-sonnet-4-6",
+            "name": "Claude Sonnet 4.6 (fallback)",
+            "contextWindow": 200000,
+            "maxTokens": 8192,
+            "input": ["text", "image"],
+            "compat": {
+              "supportsTools": true,
+              "supportsStrictMode": false,
+              "supportsStore": false,
+              "supportsPromptCacheKey": false,
+              "supportsDeveloperRole": false,
+              "supportsReasoningEffort": false,
+              "supportsUsageInStreaming": false
+            }
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "databricks/databricks-claude-opus-4-7",
+        "fallbacks": ["databricks/databricks-claude-sonnet-4-6"]
+      },
+      "memorySearch": {
+        "enabled": true,
+        "sources": ["memory", "sessions"],
+        "provider": "local",
+        "fallback": "none"
+      }
+    }
+  },
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "botToken": "<TELEGRAM_BOT_TOKEN>",
+      "dmPolicy": "allowlist",
+      "allowFrom": ["<YOUR_TELEGRAM_USER_ID>"]
+    }
+  },
+  "mcp": {
+    "servers": {
+      "serper": {
+        "command": "C:\\Users\\<YOU>\\AppData\\Roaming\\npm\\serper-mcp.cmd",
+        "args": [],
+        "env": {
+          "SERPER_API_KEY": "<SERPER_API_KEY>"
+        }
+      }
+    }
+  },
+  "tools": {
+    "media": {
+      "audio": {
+        "enabled": true,
+        "echoTranscript": true,
+        "language": "zh",
+        "models": [
+          {
+            "type": "cli",
+            "command": "C:\\Users\\<YOU>\\.openclaw\\whisper\\bin\\Release\\whisper-cli.exe",
+            "args": [
+              "-m",
+              "C:\\Users\\<YOU>\\.openclaw\\whisper\\ggml-base.bin",
+              "-otxt",
+              "-of",
+              "{{OutputBase}}",
+              "-np",
+              "-nt",
+              "{{MediaPath}}"
+            ],
+            "timeoutSeconds": 120
+          }
+        ]
+      }
+    }
+  }
+}
