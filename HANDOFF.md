@@ -427,6 +427,24 @@ powershell -NoProfile -ExecutionPolicy Bypass -File health-check.ps1
 
 正常应该只剩一条 WARN（`Exec policy: security=full ask=off`），那是刻意的——Telegram 白名单做了边界，所以 full policy 是可以接受的。其他任何 FAIL/WARN 直接对应上面那张症状表。
 
+### Telegram 远程运维命令
+
+BotFather 侧已经注册了 5 个 slash command（Telegram 客户端输入框左下角 `/` 菜单可以直接点选）：`/status` `/logs` `/restart` `/mem` `/ip`。OpenClaw 本身不支持用户自定义 slash command 路由，所以这些命令的"语义"写在 `MEMORY.md` 里由 agent 自动识别并用 `exec` 工具执行——发任何一个关键词（或中文别名"体检"、"最近日志"、"重启网关"、"记忆状态"、"代理"）都会命中同一段规则。记忆系统已对这段规则建过索引（`vector=ready`，top hit score ≈ 0.44）。
+
+命令表在 `MEMORY.md` 的 "Telegram 操作约定" 段，改命令就改那里然后 `openclaw memory index` 重建。改客户端菜单要直接调 Telegram API：
+
+```powershell
+# 查看当前注册的命令
+Invoke-RestMethod "https://api.telegram.org/bot<TOKEN>/getMyCommands"
+
+# 覆盖式更新（完整替换）
+$body = @{ commands = @(
+    @{ command = "status"; description = "系统体检" },
+    @{ command = "logs";   description = "最近日志" }
+) } | ConvertTo-Json -Depth 4
+Invoke-RestMethod "https://api.telegram.org/bot<TOKEN>/setMyCommands" -Method Post -ContentType "application/json" -Body $body
+```
+
 ## 迁移到新机器
 
 仓库里有 **`openclaw.example.json`**（脱敏模板）和 **`bootstrap.ps1`**（一键引导）。新机器上：
