@@ -417,6 +417,16 @@ Unregister-ScheduledTask -TaskName OpenClawGateway -Confirm:$false
 | Databricks 400 / 401 | 最新 log 里的 HTTP body | PAT 过期 / workspace 搬家 | Databricks 控制台重发 PAT，改 `models.providers.databricks.apiKey` 后重启 |
 | Prompt injection 被错误拒绝 | agent 返回 "不是 Leo 发的" | CLI 喂指令会被当注入 | 直接从 Telegram 发 |
 
+### 一键体检
+
+仓库里的 `health-check.ps1` 一次性扫 12 个关键点：Clash Verge、Gateway 端口、Scheduled Task、node 进程、config schema、memory index（`vector=ready`）、whisper 二进制 + 模型、Serper key、Databricks TCP、Gateway control UI、exec policy、Git 仓库状态。
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File health-check.ps1
+```
+
+正常应该只剩一条 WARN（`Exec policy: security=full ask=off`），那是刻意的——Telegram 白名单做了边界，所以 full policy 是可以接受的。其他任何 FAIL/WARN 直接对应上面那张症状表。
+
 ## 迁移到新机器
 
 仓库里有 **`openclaw.example.json`**（脱敏模板）和 **`bootstrap.ps1`**（一键引导）。新机器上：
