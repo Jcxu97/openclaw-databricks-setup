@@ -8,3 +8,5 @@ openclaw.json
 node_modules/
 .DS_Store
 Thumbs.db
+.gateway*.log
+.mcp-serper.json

@@ -185,9 +185,104 @@ $env:Path = "C:\Program Files\Git\cmd;C:\Program Files\nodejs;C:\Users\AMD\AppDa
 | `Blocked unauthorized telegram sender` | `dmPolicy: allowlist` 下 allowFrom 路径配错 | 临时改为 `dmPolicy: "open"` |
 | Telegram 域名走直连没被代理 | Clash Verge 规则里 Telegram 不在代理组 | 在 profile `prepend` 里加 Telegram 四个域名并重载 |
 
+## 2026-04-18 扩展能力
+
+在基础 Telegram × Databricks 能通之后，给这台 OpenClaw 追加了三类能力：**联网搜索**、**长期记忆**、**语音转写**。下文只记最终落地方案与踩坑。
+
+### 1. 联网搜索 — Serper MCP（已上线）
+
+没用浏览器自动化，选了 Serper 的 Google Search API（每月 2500 次免费，够用），以 **MCP server** 形式挂到 OpenClaw，模型通过 **native tool calling** 触发。
+
+```powershell
+npm i -g serper-search-scrape-mcp-server
+setx SERPER_API_KEY "472d************"
+```
+
+`openclaw.json` 里加的 MCP 配置（**注意坑**：`env` 的值不能写 `"env:SERPER_API_KEY"` 字面量，OpenClaw 当前版本不解析这个引用语法，会把字符串原样塞给子进程，结果 Serper 返回 403。**直接把 key inline 到 env 里**。文件已在 `.gitignore`）：
+
+```json
+"mcp": {
+  "servers": {
+    "serper": {
+      "command": "C:\\Users\\AMD\\AppData\\Roaming\\npm\\serper-mcp.cmd",
+      "args": [],
+      "env": { "SERPER_API_KEY": "472d************" }
+    }
+  }
+}
+```
+
+配合这一步把主模型的 `supportsTools` 从 `false` 改成 `true`，否则 Claude Opus 4.7 不会发起 tool call。实测 Telegram 里直接问"现在比特币多少钱"，模型会调 `serper__google_search` 返回实时结果。
+
+### 2. 长期记忆 — 本地 embedding + sqlite-vec（已上线）
+
+走 OpenClaw 原生 `memorySearch`，embedding 用 **embeddinggemma 300M（Q8_0 GGUF）** 完全本地推理，向量库是自带的 `sqlite-vec`，无需远程 API。
+
+`openclaw.json` 加：
+
+```json
+"agents": {
+  "defaults": {
+    "memorySearch": {
+      "enabled": true,
+      "sources": ["memory", "sessions"],
+      "provider": "local",
+      "fallback": "none"
+    }
+  }
+}
+```
+
+本地 embedding 依赖 `node-llama-cpp`，OpenClaw 不自带，要**手动挂进去**（global 装好之后用 directory junction 让 OpenClaw 的 `require` 能找到；symlink 需要管理员，junction 不需要）：
+
+```powershell
+npm install -g node-llama-cpp
+cmd /c "mklink /J `
+  `"C:\Users\AMD\AppData\Roaming\npm\node_modules\openclaw\node_modules\node-llama-cpp`" `
+  `"C:\Users\AMD\AppData\Roaming\npm\node_modules\node-llama-cpp`""
+```
+
+首次 `openclaw memory index` 会从 Hugging Face 下载 328 MB 模型到 `~\.node-llama-cpp\models\`，之后全本地。记忆内容写在 `C:\Users\AMD\.openclaw\workspace\MEMORY.md`，每次 index 后 `openclaw memory search "xx"` 能跨会话召回。
+
+验证状态：`openclaw memory status` 应该输出 `Provider: local` / `Vector: ready` / `FTS: ready`。
+
+### 3. 语音转写 — Groq whisper-large-v3-turbo（暂挂）
+
+原计划用 Groq 的 whisper-large-v3-turbo（免费额度大、速度快）。Groq key 已配好 `setx GROQ_API_KEY ...`，OpenClaw 自带的 `groq` plugin 会自动读取。
+
+**但当前 OpenClaw 版本（2026.4.15）的 Groq media-understanding provider 有 bug**：`dist/shared-Csk0T9PR.js` 里 `postTranscriptionRequest` 调 `fetch` 时，上游的 `resolveProviderHttpRequestConfig` 把 `Content-Type: application/json` 塞进了 headers，覆盖了 `FormData` 自动设置的 `multipart/form-data`，Groq 返回：
+
+```
+HTTP 400: request Content-Type isn't multipart/form-data
+```
+
+直测 `openclaw infer audio transcribe --model groq/whisper-large-v3-turbo --file xxx.wav` 稳定复现。Key 没错、proxy 没错，纯 OpenClaw 上游 bug。**暂时不改源码**，等上游修或者用顶层 `audio.transcription.command` 字段配本地 whisper.cpp 补一层。
+
+### `.gitignore` 约束
+
+```gitignore
+.pat
+.ghuser
+*.token
+*.key
+.env
+.env.*
+openclaw.json
+node_modules/
+.DS_Store
+Thumbs.db
+```
+
+`openclaw.json` 整个文件不上传，因为里面内联了 Databricks PAT、Telegram Bot Token、Serper Key、Groq Key。
+
 ## 验收
 
-Telegram 里 `@Jcxu_claude_bot` 已能正常回复，主模型是 `databricks-claude-opus-4-7`，图文都能聊。
+Telegram 里 `@Jcxu_claude_bot` 可以：
+
+1. 回答常规问题（Opus 4.7 主模型）。
+2. 自动联网搜索（Serper MCP，tool call）。
+3. 读取/写入跨会话记忆（`memory_search` / `MEMORY.md`）。
+4. 语音转写暂不可用（见上）。
 
 ## 安全提醒
 
