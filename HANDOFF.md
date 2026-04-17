@@ -478,6 +478,18 @@ PowerShell 5 默认 `$OutputEncoding` 在简体中文系统上是 GBK/936，但 
 2. 要通过 Shell 传中文给 OpenClaw CLI，把中文先 `Write-Output` 到一个 UTF-8 文件（用 IDE 的 `Write` 工具或 `[System.IO.File]::WriteAllText` 带 `UTF8Encoding($false)`），再让脚本用 `ReadAllText` 读出来传入。不要在 PS 脚本里写中文字面量。
 3. `openclaw config set --batch-file` 成功后会打印 `Config write anomaly: size-drop:9434->3881`。**这不是数据丢失**，是文件从 PowerShell 深缩进格式被改写成标准 2 空格 JSON（大小自然缩水），内容完整。用 `openclaw config validate` 或者 IDE 的 Read 工具确认就好。
 
+### ⚠️ Groq / OpenAI-compat 语音转写 HTTP 400（已提 upstream issue #68294）
+
+**症状**：`openclaw infer audio transcribe ... --model "groq/whisper-large-v3-turbo"` 失败，Groq 返回 `"request Content-Type isn't multipart/form-data"`。
+
+**根因**：Node 24 内置 undici（约 6.x）和 OpenClaw 自带的 `undici@8.0.2` 是两个 realm，各自的 `FormData` class 不互认。`transcribeOpenAiCompatibleAudio` 里 `new FormData()` 用的是 Node 全局（旧 undici），但请求随附的 `init.dispatcher` 是 OpenClaw 绑的 undici 8 的 Agent。Node 原生 fetch 把请求委托给外部 dispatcher 后，undici 8 对 body 做 `instanceof this.FormData` 判断失败，退化为非 multipart 序列化，Groq 拒绝。
+
+**本机现状**：`tools.media.audio.models` 指向本地 `whisper-cli.exe`（whisper.cpp + ggml-base），所以 Telegram 语音入口**不走 provider 路径**，不受这个 bug 影响。日常使用没事。
+
+**等 upstream 修好后要做的**：把 `tools.media.audio.models` 改回 `[{ "type": "provider", "ref": "groq/whisper-large-v3-turbo" }]`，就能切到 Groq Turbo（延迟降一个数量级、中文识别更准）。
+
+**issue 链接**：https://github.com/openclaw/openclaw/issues/68294 （里面附了完整 trace、跨 realm FormData 验证代码、修复草案）。
+
 
 ## 迁移到新机器
 
