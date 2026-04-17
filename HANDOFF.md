@@ -429,9 +429,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File health-check.ps1
 
 ### Telegram 远程运维命令
 
-BotFather 侧已经注册了 5 个 slash command（Telegram 客户端输入框左下角 `/` 菜单可以直接点选）：`/status` `/logs` `/restart` `/mem` `/ip`。OpenClaw 本身不支持用户自定义 slash command 路由，所以这些命令的"语义"写在 `MEMORY.md` 里由 agent 自动识别并用 `exec` 工具执行——发任何一个关键词（或中文别名"体检"、"最近日志"、"重启网关"、"记忆状态"、"代理"）都会命中同一段规则。记忆系统已对这段规则建过索引（`vector=ready`，top hit score ≈ 0.44）。
+BotFather 侧已经注册了 5 个 slash command（Telegram 客户端输入框左下角 `/` 菜单可以直接点选）：`/status` `/logs` `/restart` `/mem` `/ip`。OpenClaw 本身不支持用户自定义 slash command 路由，所以这些命令的"语义"是靠两层机制保证的：
 
-命令表在 `MEMORY.md` 的 "Telegram 操作约定" 段，改命令就改那里然后 `openclaw memory index` 重建。改客户端菜单要直接调 Telegram API：
+1. **AGENTS.md 里的硬绑定**（`C:\Users\AMD\.openclaw\workspace\AGENTS.md` 的 "Leo Operator Commands (binding)" 段）。OpenClaw 每次 session startup 都会整文件加载 `AGENTS.md` 到 system context，所以这段规则在上下文里是"始终存在"，不依赖向量检索命中。文件里同时写死了"只在 Telegram DM 且发件人是 Leo 时"才执行，避免在群聊、CLI、hooks 等路径上被触发。
+2. **MEMORY.md 里的软规则**（`C:\Users\AMD\.openclaw\workspace\MEMORY.md` 的 "Telegram 操作约定" 段）。作为语义检索的回退，方便未来 agent 被注入到别的 workspace 时仍能通过 memory search 召回。
+
+改命令表：直接编辑 `AGENTS.md` 的 Leo Operator Commands 段（不必 reindex，下次对话就生效）；同步改 `MEMORY.md` 并 `openclaw memory index` 让软规则保持一致。改客户端菜单要直接调 Telegram API：
 
 ```powershell
 # 查看当前注册的命令
