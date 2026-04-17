@@ -448,6 +448,37 @@ $body = @{ commands = @(
 Invoke-RestMethod "https://api.telegram.org/bot<TOKEN>/setMyCommands" -Method Post -ContentType "application/json" -Body $body
 ```
 
+### 图片理解（2026-04-18 上线）
+
+在 `openclaw.json` 的 `tools.media.image` 打开了图片理解，用 agent 的主模型（Opus 4.7 的 `input: ["text", "image"]`）跑。Telegram 收到图片后自动进 pipeline：中文 prompt 强制说明"有文字就 OCR、有场景就简要描述、有人物只给可见视觉特征不做身份猜测"，结果注入到对话上下文。
+
+关键字段（`openclaw config get tools.media.image` 查看）：
+
+| 字段 | 值 | 说明 |
+| --- | --- | --- |
+| `enabled` | `true` | 开关 |
+| `scope.default` | `allow` | 所有消息源都允许；细粒度要走 `scope.rules` |
+| `language` | `"zh"` | 中文输出 |
+| `maxBytes` | 10 MiB | 超过这个尺寸的附件直接跳过 |
+| `maxChars` | 4000 | 单次理解输出字符上限，防止 prompt 膨胀 |
+| `timeoutSeconds` | 60 | 请求超时 |
+
+**没配 `tools.media.image.models`**，所以会 fallback 到 `agents.defaults.model`（Opus → Sonnet）。如果要强制走别的多模态模型（比如接了 Gemini/GPT-4o），在这里按 schema 加 `models: [{ ref: "provider/id" }]`。
+
+### ⚠️ PowerShell 5 终端显示 mojibake（不是数据坏）
+
+PowerShell 5 默认 `$OutputEncoding` 在简体中文系统上是 GBK/936，但 OpenClaw、Node、JSON 文件都用 UTF-8。结果：
+
+1. 在 Shell 里打印 UTF-8 中文字符串，控制台会显示成乱码（例如 `完整 OCR` 被渲染成 `完�?OCR`）。
+2. 在 Shell 脚本里写中文字符串字面量，PS5 会按 GBK 解析再传给子进程，子进程按 UTF-8 解码就坏了。
+
+**处理方式**：
+
+1. 判断数据到底坏没坏，不看 `Write-Host` 或 `openclaw config get`——它们是显示层。用 `Get-Content` 读文件时 PS 也会乱码，唯一可靠的方式是 `[System.IO.File]::ReadAllBytes` + `[System.Text.Encoding]::UTF8.GetString`，或者直接在 IDE 里用 Grep / Read（它们按文件 BOM / UTF-8 解码）。
+2. 要通过 Shell 传中文给 OpenClaw CLI，把中文先 `Write-Output` 到一个 UTF-8 文件（用 IDE 的 `Write` 工具或 `[System.IO.File]::WriteAllText` 带 `UTF8Encoding($false)`），再让脚本用 `ReadAllText` 读出来传入。不要在 PS 脚本里写中文字面量。
+3. `openclaw config set --batch-file` 成功后会打印 `Config write anomaly: size-drop:9434->3881`。**这不是数据丢失**，是文件从 PowerShell 深缩进格式被改写成标准 2 空格 JSON（大小自然缩水），内容完整。用 `openclaw config validate` 或者 IDE 的 Read 工具确认就好。
+
+
 ## 迁移到新机器
 
 仓库里有 **`openclaw.example.json`**（脱敏模板）和 **`bootstrap.ps1`**（一键引导）。新机器上：
