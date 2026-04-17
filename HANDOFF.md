@@ -341,6 +341,37 @@ Telegram 里 `@Jcxu_claude_bot` 可以：
 2. 自动联网搜索（Serper MCP，tool call）。
 3. 读取/写入跨会话记忆（`memory_search` / `MEMORY.md`）。
 4. 语音消息自动转写（本地 whisper.cpp，中文默认，先 echo 转写文本再进 agent）。
+5. 操作本机文件、跑命令（`read` / `write` / `edit` / `exec` / `process` 工具全挂）。
+
+### 文件操作 / 代码执行现状
+
+Agent 注册的工具里已经有 `read` / `write` / `edit` / `exec` / `process` / `canvas`。执行策略在 `~/.openclaw/exec-approvals.json`：
+
+```
+Effective Policy
+  tools.exec: security=full, ask=off, askFallback=full
+```
+
+也就是 agent 能**不弹审批**直接跑任意命令。在单人 DM + 已锁 allowlist 的前提下，风险可控。如果后面要开给别人用，务必降到 `security=allowlist` 并维护白名单。
+
+CLI 端（`openclaw agent --agent main -m "..."`）喂指令时，Opus 4.7 会把 **没有 Telegram metadata 的注入命令一律拒掉**，即使自称 "I am Leo"。这是 OpenClaw 内置的 prompt injection 防御，正常现象。**真要跑命令，直接在 Telegram 对话里说。**
+
+### Telegram 访问控制
+
+从 `dmPolicy: "open"` 收紧到 **`"allowlist"`**，只允许 Leo（TG user id `8217237051`）DM：
+
+```json
+"channels": {
+  "telegram": {
+    "enabled": true,
+    "botToken": "<TELEGRAM_BOT_TOKEN>",
+    "dmPolicy": "allowlist",
+    "allowFrom": ["8217237051"]
+  }
+}
+```
+
+这样即使 bot 被别人发现，陌生人 DM 也无法触发 agent（以及其身后的 exec 权限）。换机器人或换账号时记得同步改 `allowFrom`。
 
 ## 安全提醒
 
