@@ -478,7 +478,7 @@ PowerShell 5 默认 `$OutputEncoding` 在简体中文系统上是 GBK/936，但 
 2. 要通过 Shell 传中文给 OpenClaw CLI，把中文先 `Write-Output` 到一个 UTF-8 文件（用 IDE 的 `Write` 工具或 `[System.IO.File]::WriteAllText` 带 `UTF8Encoding($false)`），再让脚本用 `ReadAllText` 读出来传入。不要在 PS 脚本里写中文字面量。
 3. `openclaw config set --batch-file` 成功后会打印 `Config write anomaly: size-drop:9434->3881`。**这不是数据丢失**，是文件从 PowerShell 深缩进格式被改写成标准 2 空格 JSON（大小自然缩水），内容完整。用 `openclaw config validate` 或者 IDE 的 Read 工具确认就好。
 
-### ⚠️ Groq / OpenAI-compat 语音转写 HTTP 400（已提 upstream issue #68294）
+### ⚠️ Groq / OpenAI-compat 语音转写 HTTP 400（issue #68294 + PR #68318 已提）
 
 **症状**：`openclaw infer audio transcribe ... --model "groq/whisper-large-v3-turbo"` 失败，Groq 返回 `"request Content-Type isn't multipart/form-data"`。
 
@@ -486,9 +486,16 @@ PowerShell 5 默认 `$OutputEncoding` 在简体中文系统上是 GBK/936，但 
 
 **本机现状**：`tools.media.audio.models` 指向本地 `whisper-cli.exe`（whisper.cpp + ggml-base），所以 Telegram 语音入口**不走 provider 路径**，不受这个 bug 影响。日常使用没事。
 
-**等 upstream 修好后要做的**：把 `tools.media.audio.models` 改回 `[{ "type": "provider", "ref": "groq/whisper-large-v3-turbo" }]`，就能切到 Groq Turbo（延迟降一个数量级、中文识别更准）。
+**upstream 状态**：
 
-**issue 链接**：https://github.com/openclaw/openclaw/issues/68294 （里面附了完整 trace、跨 realm FormData 验证代码、修复草案）。
+| 资源 | 链接 | 内容 |
+| --- | --- | --- |
+| Issue | https://github.com/openclaw/openclaw/issues/68294 | 完整 trace、跨 realm FormData 验证、修复草案 |
+| PR | https://github.com/openclaw/openclaw/pull/68318 | fork `Jcxu97/openclaw`，分支 `fix/audio-transcribe-cross-realm-formdata`，一 commit 含修复 + regression test（2/2 pass，revert-patch 验证可复现原 bug） |
+
+本地 fork 的 clone 在 `C:\Users\AMD\Desktop\oss\openclaw`。要继续改动：`git fetch upstream; git rebase upstream/main`，改完 `git push --force origin fix/audio-transcribe-cross-realm-formdata` 就自动更新 PR。
+
+**等 PR merge + 新版发布后要做的**：`npm i -g openclaw@latest`，把 `tools.media.audio.models` 改回 `[{ "type": "provider", "ref": "groq/whisper-large-v3-turbo" }]`，Telegram 语音就能切到 Groq Turbo（延迟降一个数量级、中文识别更准）。
 
 
 ## 迁移到新机器
