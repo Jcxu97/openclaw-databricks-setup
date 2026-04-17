@@ -246,17 +246,75 @@ cmd /c "mklink /J `
 
 验证状态：`openclaw memory status` 应该输出 `Provider: local` / `Vector: ready` / `FTS: ready`。
 
-### 3. 语音转写 — Groq whisper-large-v3-turbo（暂挂）
+### 3. 语音转写 — 本地 whisper.cpp（已上线）
 
-原计划用 Groq 的 whisper-large-v3-turbo（免费额度大、速度快）。Groq key 已配好 `setx GROQ_API_KEY ...`，OpenClaw 自带的 `groq` plugin 会自动读取。
-
-**但当前 OpenClaw 版本（2026.4.15）的 Groq media-understanding provider 有 bug**：`dist/shared-Csk0T9PR.js` 里 `postTranscriptionRequest` 调 `fetch` 时，上游的 `resolveProviderHttpRequestConfig` 把 `Content-Type: application/json` 塞进了 headers，覆盖了 `FormData` 自动设置的 `multipart/form-data`，Groq 返回：
+原计划用 Groq 的 whisper-large-v3-turbo 云端转写，但 **OpenClaw 2026.4.15 的 Groq media-understanding provider 有 bug**：`dist/shared-Csk0T9PR.js` 里 `postTranscriptionRequest` 往 headers 里塞了 `Content-Type: application/json`，覆盖了 FormData 的自动 `multipart/form-data`，Groq 稳定返回：
 
 ```
 HTTP 400: request Content-Type isn't multipart/form-data
 ```
 
-直测 `openclaw infer audio transcribe --model groq/whisper-large-v3-turbo --file xxx.wav` 稳定复现。Key 没错、proxy 没错，纯 OpenClaw 上游 bug。**暂时不改源码**，等上游修或者用顶层 `audio.transcription.command` 字段配本地 whisper.cpp 补一层。
+Key 没错、proxy 没错，纯 OpenClaw 上游 bug。**换路线走本地 whisper.cpp**，CPU 推理，完全离线，零 token 成本。
+
+下载 whisper.cpp Windows BLAS 版 + ggml-base 多语言模型（含中文）：
+
+```powershell
+gh release download v1.8.4 --repo ggerganov/whisper.cpp `
+  --pattern "whisper-blas-bin-x64.zip" `
+  --dir "C:\Users\AMD\.openclaw\whisper"
+Expand-Archive "C:\Users\AMD\.openclaw\whisper\whisper-blas-bin-x64.zip" `
+  -DestinationPath "C:\Users\AMD\.openclaw\whisper\bin" -Force
+Invoke-WebRequest `
+  -Uri "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin" `
+  -OutFile "C:\Users\AMD\.openclaw\whisper\ggml-base.bin"
+```
+
+`whisper-cli.exe` 落在 `C:\Users\AMD\.openclaw\whisper\bin\Release\`，模型 148 MB。
+
+OpenClaw 的 config 路径是 **`tools.media.audio.models`**（`audio.transcription` 是 legacy，会被 doctor 自动迁移），显式写进 `openclaw.json`：
+
+```json
+"tools": {
+  "media": {
+    "audio": {
+      "enabled": true,
+      "echoTranscript": true,
+      "language": "zh",
+      "models": [
+        {
+          "type": "cli",
+          "command": "C:\\Users\\AMD\\.openclaw\\whisper\\bin\\Release\\whisper-cli.exe",
+          "args": [
+            "-m", "C:\\Users\\AMD\\.openclaw\\whisper\\ggml-base.bin",
+            "-otxt", "-of", "{{OutputBase}}",
+            "-np", "-nt",
+            "{{MediaPath}}"
+          ],
+          "timeoutSeconds": 120
+        }
+      ]
+    }
+  }
+}
+```
+
+模板占位符由 OpenClaw runtime 注入：`{{MediaPath}}` 是输入音频临时路径，`{{OutputBase}}` 是输出文件无扩展名基名（whisper-cli 用 `-otxt -of xxx` 写出 `xxx.txt`，OpenClaw 再读回来）。`-np` 压掉进度、`-nt` 去掉时间戳，保证输出是纯文本。
+
+**额外加持**：OpenClaw 还支持环境变量自动发现——只要 `whisper-cli` 在 PATH 里 + `WHISPER_CPP_MODEL` 指向模型，无需显式配置也会自动挂上（见 `dist/runner-GjYg-C-v.js` 的 `resolveLocalWhisperCppEntry`）。我们两条路都配了，双保险：
+
+```powershell
+setx WHISPER_CPP_MODEL "C:\Users\AMD\.openclaw\whisper\ggml-base.bin"
+# Path 追加 C:\Users\AMD\.openclaw\whisper\bin\Release
+```
+
+验证：
+
+```powershell
+openclaw infer audio transcribe --file "C:\Windows\Media\tada.wav" --json
+# → outputs[0].text = "[MUSIC PLAYING]"
+```
+
+Telegram 语音消息（`.ogg/.oga`）通过 `tools.media.audio.enabled=true` 自动触发此 pipeline，`echoTranscript=true` 会把识别文本先回显给用户再喂给 agent。
 
 ### `.gitignore` 约束
 
@@ -282,7 +340,7 @@ Telegram 里 `@Jcxu_claude_bot` 可以：
 1. 回答常规问题（Opus 4.7 主模型）。
 2. 自动联网搜索（Serper MCP，tool call）。
 3. 读取/写入跨会话记忆（`memory_search` / `MEMORY.md`）。
-4. 语音转写暂不可用（见上）。
+4. 语音消息自动转写（本地 whisper.cpp，中文默认，先 echo 转写文本再进 agent）。
 
 ## 安全提醒
 
