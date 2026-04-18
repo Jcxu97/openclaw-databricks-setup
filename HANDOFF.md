@@ -606,41 +606,32 @@ OpenClaw 有官方 iOS 和 Android app，装上后手机变成 gateway 的一个
 
 Clash Verge 默认用 **Fake-IP 模式** 加速匹配，把任意域名解析成 `198.18.0.0/15` 段的占位 IP（比如 `www.huya.com → 198.18.0.38`）。这个段是 **RFC 2544 benchmarking 保留段**，IANA special-use IP。OpenClaw 的 SSRF guard 看到特殊段地址就拒，不会等到 Clash 接管流量再判断。
 
-### 修法（已落地）
+### 修法尝试 1（失败 —— 供后人避坑）
 
-**1. Gateway 进程 env 里不要 proxy**，只给**真正需要出海的上游**单独配：
+初版思路是"把 proxy env 只给需要出海的上游"：gateway env 删 proxy、databricks provider 用 `request.proxy.mode = "explicit-proxy"`、Serper MCP 用 `mcp.servers.serper.env.HTTPS_PROXY` 单独注入。结果 gateway 一重启 Telegram agent 立刻秒回 `⚠️ Something went wrong`，gateway 日志里是 `FailoverError: LLM request failed: network connection error (timeout, status=408)`。
 
-`~/.openclaw/start-gateway.ps1` 里这三行：
+**原因**：OpenClaw 的 `models.providers.<p>.request.proxy` 字段在 schema 里存在但**运行时没有真的生效**（至少在 2026.4.15 版本里 Databricks 这条路径不读它）。gateway env 一删 proxy，LLM fetch 就走直连，GFW 下必 timeout。
+
+**教训**：schema validation 通过 ≠ 功能生效。OpenClaw 有些 config 是"reserved for future"或者某些 provider path 专用的，验证能过不代表路径上真读。以后改 proxy 类配置必须跟一条"最小闭环冒烟测试"（发一条 Telegram 消息看 agent 能不能回），不能只看 `config validate`。
+
+### 修法（实际落地）
+
+回到**最简单稳妥的版本**：gateway env 级别设 proxy，让所有子系统（provider、MCP、browser）都继承它。然后在**系统侧**干掉 Fake-IP 让 browser SSRF guard 不受 DNS 干扰。
+
+**1. Gateway 启动脚本留 proxy env**（`~/.openclaw/start-gateway.ps1`）：
 
 ```powershell
-$env:HTTP_PROXY  = $null
-$env:HTTPS_PROXY = $null
-$env:NO_PROXY    = $null
+$env:NODE_OPTIONS  = "--use-env-proxy"
+$env:HTTPS_PROXY   = "http://127.0.0.1:7897"
+$env:HTTP_PROXY    = "http://127.0.0.1:7897"
+$env:NO_PROXY      = "localhost,127.0.0.1,::1"
 ```
 
-**2. Databricks provider 走 explicit-proxy**（`openclaw.json`）：
+**2. 系统侧：关 Clash Verge 的 Fake-IP**：
 
-```json
-"models": {
-  "providers": {
-    "databricks": {
-      "request": { "proxy": { "mode": "explicit-proxy", "url": "http://127.0.0.1:7897" } }
-    }
-  }
-}
-```
+Clash Verge → 设置 → DNS 设置 → "DNS 模式" 从 "Fake IP" 改成 "Redir Host"（或者整个 DNS 模块关掉让系统 DNS 接手）→ 保存。DNS 恢复返回真公网 IP 后，browser SSRF guard 不会再把国内站判成 special-use。
 
-**3. Serper MCP 进程级注入 proxy env**：
-
-```json
-"mcp": { "servers": { "serper": { "env": {
-  "SERPER_API_KEY": "env:SERPER_API_KEY",
-  "HTTP_PROXY": "http://127.0.0.1:7897",
-  "HTTPS_PROXY": "http://127.0.0.1:7897"
-}}}}
-```
-
-**4. Browser SSRF 白名单**（Fake-IP 下国内站绕行）：
+**3. Browser SSRF 白名单**（Fake-IP 没关掉时的兜底）：
 
 ```json
 "browser": { "ssrfPolicy": { "allowedHostnames": [
@@ -652,11 +643,14 @@ $env:NO_PROXY    = $null
 
 加新站随时扩这个 array。`openclaw config set --batch-file <patch.json>` 原子更新（patch 文件是 `[{ "path": "...", "value": ... }]` 数组格式）。改完必 `Stop-Process -Force -Id <pid>` + `Start-ScheduledTask -TaskName OpenClawGateway` 才生效，`config set` 提示的 "Restart the gateway to apply" 是字面意思。
 
-### 长期建议（根治 Fake-IP 问题）
+### 两难 tradeoff
 
-**Clash Verge → 设置 → DNS → 把 "模式" 从 "Fake-IP" 改成 "Redir-Host"**（或者直接"关闭 DNS 模块"让系统 DNS 接手）。Redir-Host 模式下域名解析返回真公网 IP，SSRF guard 永远满意。做完以后 `browser.ssrfPolicy.allowedHostnames` 就可以清空。
+browser 工具的 strict SSRF 策略和 proxy env 从设计上就互斥：
 
-没改 Clash 的时候新站被拒就加白名单，懒得改 Clash 长期这样用也行。
+- **有 proxy env**：LLM 调用走代理能出海，但 browser 的 SSRF 自我关闭，必须用 `allowedHostnames` 白名单补。Fake-IP 下每个新站都要加。
+- **无 proxy env**：browser SSRF 能完整 enforce，但 LLM 必须通过 provider-level 代理配置才能出海 —— 而 OpenClaw 2026.4.15 的 `request.proxy` 字段不工作（见上面修法尝试 1）。
+
+**当前选择**：有 proxy env + 白名单兜底 + 推荐你改 Clash DNS 从根本消除 Fake-IP。改完 DNS 后白名单虽然保留也能清空，对系统无害。
 
 ### 验证
 
@@ -665,7 +659,7 @@ openclaw browser --json navigate "https://www.huya.com"
 # { "ok": true, "targetId": "...", "url": "https://www.huya.com/" }
 ```
 
-Telegram 里对 agent 说"打开浏览器 XX 站"，agent 直接调 browser 工具跳转。做网页自动化、Canvas 取数据、截图发群，都基于这条链路。
+Telegram 里对 agent 说"打开浏览器 XX 站"，agent 调 browser 工具跳转。做网页自动化、Canvas 取数据、截图发群，都基于这条链路。
 
 ### 附：`openclaw config set --batch-file` 的坑
 
