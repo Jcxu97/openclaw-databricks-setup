@@ -498,6 +498,93 @@ PowerShell 5 默认 `$OutputEncoding` 在简体中文系统上是 GBK/936，但 
 **等 PR merge + 新版发布后要做的**：`npm i -g openclaw@latest`，把 `tools.media.audio.models` 改回 `[{ "type": "provider", "ref": "groq/whisper-large-v3-turbo" }]`，Telegram 语音就能切到 Groq Turbo（延迟降一个数量级、中文识别更准）。
 
 
+## 进阶功能（2026-04-18 启用）
+
+这一批功能把 OpenClaw 从"Telegram 聊天机器人"升级成"带后台、会主动干活、能看真网页的 agent 平台"。全部 6 项上线、已验证。
+
+### Control UI Dashboard
+
+浏览器后台，gateway 自带。入口 `openclaw dashboard` 或直接 `http://127.0.0.1:18789/`。首次访问要粘贴 **gateway token**（见下）。Dashboard 里能看 sessions / channels 状态 / agents 活动 / config / memory / logs / cron，比 Telegram 视角完整得多。
+
+**gateway token**：写在 `openclaw.json` 的 `gateway.auth.token` 字段（43 字节 base64url，`__OPENCLAW_REDACTED__` 是 `openclaw config get` 的显示掩码，文件里是明文）。Dashboard 首次访问：密码框留空，token 粘贴到"网关令牌"框。浏览器 Chrome 密码管理器记住后以后免登录。
+
+```powershell
+Get-Content "$HOME\.openclaw\openclaw.json" | Select-String 'gateway' -Context 0,5
+```
+
+上面这行能看到 token 明文。token 旋转时：`openclaw config set gateway.auth.token <new_token>` 然后重启 gateway。
+
+### Backup / Restore
+
+`openclaw backup create --output <dir> --verify` 做完整快照，含 config + sessions + memory + workspaces + auth，~160 MB。archive tar 格式可以任意拷贝到其他机器，解压到 `~/.openclaw` 就是完整复原。本机快照放在 `~/openclaw-backups/`。
+
+建议**每次动大配置前**先跑一次，恢复只需解 tar 覆盖。`openclaw backup verify <archive>` 可独立校验归档完整性。
+
+### Cron（主动 agent）
+
+`openclaw cron add` 让 agent 按 cron 表达式自动跑。已注册的任务：
+
+| 名字 | 表达式 | 动作 |
+| --- | --- | --- |
+| `daily-pr-68318-status` | `0 9 * * *` Asia/Shanghai | 调 `gh pr view 68318`，中文总结，发 Telegram DM |
+
+常用命令：`openclaw cron list` / `openclaw cron runs --id <uuid>` / `openclaw cron run <uuid>`（立即执行调试）/ `openclaw cron rm <uuid>`。message 里带中文的坑：PowerShell 5 传中文字面量会 GBK 乱码，**必须先写到 UTF-8 文件再用 `[System.IO.File]::ReadAllText(..., [System.Text.Encoding]::UTF8)` 读出来传给 `--message $var`**，不能直接 `--message "中文"`。
+
+### Browser（真浏览器，CDP）
+
+Agent 能开 Chrome 做网页操作 —— navigate / click / type / fill / screenshot / pdf / console / cookies / trace，完整 Playwright 级别。入口 `openclaw browser status`。本机自动检测到 `C:\Program Files\Google\Chrome\Application\chrome.exe`，transport=CDP，port 18800。Browser 不常驻，agent 用的时候自动启。想让 agent 跑浏览器，在对话里说"用 browser 打开 xxx 并截屏"就行。
+
+### Docs Search（内建文档搜索）
+
+`openclaw docs "<query>"` 秒搜整个 docs.openclaw.ai，命中带 URL。以后问"XX 怎么用"让 agent 先跑这个再回答，不用自己翻官网。
+
+### ClawHub Skills 市场
+
+`openclaw skills search <keyword>` 连 clawhub.com 云端 registry，`openclaw skills install <id>` 装任意社区 skill 到当前 workspace。`openclaw skills list` 看本地已装。本机内置 52 个 bundled skill，其中 ready 的 8 个：`gh-issues` / `github` / `healthcheck` / `skill-creator` / `taskflow` / `taskflow-inbox-triage` / `weather` / `node-connect`。其他 44 个 `needs-setup`（各自需要安装对应 CLI 或 API key）。
+
+### Canvas（交互式画布）
+
+Agent 产出的可视化成品可以渲染成真 React 组件。workspace 根目录 `~/.openclaw/canvas/`，挂载点 `http://127.0.0.1:18789/__openclaw__/canvas/`（token 保护）。Dashboard 里有 Canvas 标签页直接打开。典型用法：让 agent 把 `health-check.ps1` 的输出画成仪表盘；查过去 7 天 Databricks 用量画图。
+
+## 未启用功能（哪天想做再开）
+
+### Mobile Node（手机 App 节点）
+
+OpenClaw 有官方 iOS 和 Android app，装上后手机变成 gateway 的一个 node，摄像头 / 语音 / 通知全部打通。没启用的卡点：gateway 当前 `bind=loopback`（只监听 127.0.0.1），手机连不上。启用步骤：
+
+1. 决定网络方案（三选一）：
+   - **LAN**（家庭 WiFi，最省）：`openclaw config set gateway.bind lan`。注意局域网任何设备都能尝试连，靠 token 拦。
+   - **Tailscale**（出门也能用，推荐）：`openclaw config set gateway.bind lan` + `openclaw config set gateway.remote.url https://<tailnet-name>.ts.net` + 双端装 Tailscale。
+   - **公网 tunnel**：Cloudflare Tunnel 类方案，需要域名。
+2. 重启 gateway。
+3. `openclaw qr`（terminal 里直接画 ASCII QR），或 `openclaw qr --setup-code-only` 看短配对码。
+4. 手机装 OpenClaw App（App Store / Play Store 搜 "OpenClaw"），启动扫 QR 或输入 setup code。
+5. 回 PowerShell 跑 `openclaw devices approve <device-id>` 批准配对。
+
+安全提醒：启用 `bind=lan` 等于把 gateway 暴露到同网段。token（43 字节 base64url）是唯一防线，**不要泄漏 `openclaw.json` 或 Dashboard 截图**。
+
+### Sandbox（容器隔离 exec）
+
+本机没装 Docker 或 Podman，跳过。如果以后想开：装 Docker Desktop（Windows 要 WSL2），OpenClaw 会自动检测到，`openclaw sandbox list` 就能管容器。当前 `exec` 直接在宿主机跑，`security=full ask=off` 状态下 agent 运行任意 shell 无询问，日常用但心里要有数。
+
+### 多 Agent / 多 Workspace
+
+当前只有 `main` 一个 agent，所有对话共享一份 `MEMORY.md` 和工具集。OpenClaw 支持拆成多个独立 agent（各自 workspace、memory、默认 model、tool allowlist）。典型拆法：
+
+| Agent 名 | 用途 | Telegram 触发 |
+| --- | --- | --- |
+| `main` | 通用（现状） | 默认 |
+| `code` | 编程、代码 review、PR 操作 | `/code <prompt>` 或单独 bot |
+| `journal` | 日记、个人记忆、不被技术事务污染 | `/journal` |
+
+启用大致流程（哪天要拆了再跑）：
+
+1. `openclaw agents add code --workspace $HOME\.openclaw\agents\code\workspace`
+2. 各自 `workspace\AGENTS.md` 和 `MEMORY.md` 独立编辑 + `openclaw memory index --agent code`
+3. Telegram 绑 slash command 路由（改 AGENTS.md 的 Operator Commands 段，加分流规则）
+
+没有切实的拆分动机就别拆，记忆混不混其实一个主 agent 里用 prefix (`#code` / `#journal`) 区分就行。
+
 ## 迁移到新机器
 
 仓库里有 **`openclaw.example.json`**（脱敏模板）和 **`bootstrap.ps1`**（一键引导）。新机器上：
