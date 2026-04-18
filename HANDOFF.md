@@ -614,9 +614,9 @@ Clash Verge 默认用 **Fake-IP 模式** 加速匹配，把任意域名解析成
 
 **教训**：schema validation 通过 ≠ 功能生效。OpenClaw 有些 config 是"reserved for future"或者某些 provider path 专用的，验证能过不代表路径上真读。以后改 proxy 类配置必须跟一条"最小闭环冒烟测试"（发一条 Telegram 消息看 agent 能不能回），不能只看 `config validate`。
 
-### 修法（实际落地）
+### 修法（实际落地，三步）
 
-回到**最简单稳妥的版本**：gateway env 级别设 proxy，让所有子系统（provider、MCP、browser）都继承它。然后在**系统侧**干掉 Fake-IP 让 browser SSRF guard 不受 DNS 干扰。
+回到**最简单稳妥的版本**：gateway env 级别设 proxy 让所有子系统都继承，系统侧关 Fake-IP 让 DNS 正常，browser 工具放开 SSRF 让 proxy env 不阻塞 navigate。
 
 **1. Gateway 启动脚本留 proxy env**（`~/.openclaw/start-gateway.ps1`）：
 
@@ -627,43 +627,72 @@ $env:HTTP_PROXY    = "http://127.0.0.1:7897"
 $env:NO_PROXY      = "localhost,127.0.0.1,::1"
 ```
 
-**2. 系统侧：关 Clash Verge 的 Fake-IP**：
+**2. Clash Verge 从 Fake-IP 切到 Redir-Host**：
 
-Clash Verge → 设置 → DNS 设置 → "DNS 模式" 从 "Fake IP" 改成 "Redir Host"（或者整个 DNS 模块关掉让系统 DNS 接手）→ 保存。DNS 恢复返回真公网 IP 后，browser SSRF guard 不会再把国内站判成 special-use。
+不用开 UI，直接改文件。Verge 的 merge 机制是"订阅 + 全局 Merge.yaml + profile merge.yaml"三层合并。全局 merge 文件在 `%APPDATA%\io.github.clash-verge-rev.clash-verge-rev\profiles\Merge.yaml`，加一行就行：
 
-**3. Browser SSRF 白名单**（Fake-IP 没关掉时的兜底）：
+```yaml
+# Profile Enhancement Merge Template for Clash Verge
 
-```json
-"browser": { "ssrfPolicy": { "allowedHostnames": [
-  "huya.com", "www.huya.com", "m.huya.com",
-  "bilibili.com", "www.bilibili.com",
-  "douyu.com", "www.douyu.com"
-] } }
+profile:
+  store-selected: true
+
+dns:
+  use-system-hosts: false
+  enhanced-mode: redir-host    # <-- 这一行
 ```
 
-加新站随时扩这个 array。`openclaw config set --batch-file <patch.json>` 原子更新（patch 文件是 `[{ "path": "...", "value": ... }]` 数组格式）。改完必 `Stop-Process -Force -Id <pid>` + `Start-ScheduledTask -TaskName OpenClawGateway` 才生效，`config set` 提示的 "Restart the gateway to apply" 是字面意思。
+然后热重载（Verge external-controller 监听 127.0.0.1:9097）：
 
-### 两难 tradeoff
+```powershell
+$cfg = "$env:APPDATA\io.github.clash-verge-rev.clash-verge-rev\clash-verge.yaml"
+# 直接改运行时快照（下次 Verge merge 会从 Merge.yaml 重新生成并保持 redir-host）
+(Get-Content $cfg) -replace 'enhanced-mode: fake-ip', 'enhanced-mode: redir-host' | Set-Content $cfg -Encoding UTF8
+$body = @{ path = $cfg } | ConvertTo-Json -Compress
+Invoke-WebRequest -Uri "http://127.0.0.1:9097/configs?force=true" -Method Put -ContentType "application/json" -Body $body -UseBasicParsing
+Clear-DnsClientCache
+```
 
-browser 工具的 strict SSRF 策略和 proxy env 从设计上就互斥：
+验证：`Resolve-DnsName www.bilibili.com -Type A` 应该看到真公网 IP（`116.xxx` / `175.xxx`）而不是 `198.18.x.x`。
 
-- **有 proxy env**：LLM 调用走代理能出海，但 browser 的 SSRF 自我关闭，必须用 `allowedHostnames` 白名单补。Fake-IP 下每个新站都要加。
-- **无 proxy env**：browser SSRF 能完整 enforce，但 LLM 必须通过 provider-level 代理配置才能出海 —— 而 OpenClaw 2026.4.15 的 `request.proxy` 字段不工作（见上面修法尝试 1）。
+**3. Browser SSRF 放开 private-network**（`openclaw.json`）：
 
-**当前选择**：有 proxy env + 白名单兜底 + 推荐你改 Clash DNS 从根本消除 Fake-IP。改完 DNS 后白名单虽然保留也能清空，对系统无害。
+```json
+"browser": {
+  "ssrfPolicy": {
+    "dangerouslyAllowPrivateNetwork": true,
+    "allowedHostnames": []
+  }
+}
+```
+
+这一步**是 tradeoff**：开了以后 browser 能 navigate 任何地址，包括私有段 / loopback / special-use。prompt injection 下 agent 理论上可以去探你家路由器管理页。你这台机是单人 `security=full ask=off` 模式，本来就是"信任 agent"姿态，多这一档风险可以接受。如果哪天把 gateway 开放给不信任的人，**把 dangerouslyAllowPrivateNetwork 改回 false，维护 allowedHostnames 白名单**。
+
+改完 `openclaw config set --batch-file <patch.json>` 然后 `Stop-Process` + `Start-ScheduledTask OpenClawGateway`。
+
+### 尝试过的失败方案（供后人避坑）
+
+初版想"按子系统拆 proxy"：gateway env 删 proxy，databricks provider 用 `request.proxy.mode = "explicit-proxy"`，Serper MCP 用 `mcp.servers.serper.env.HTTPS_PROXY` 单独注入。结果 gateway 重启后 Telegram agent 秒回 `⚠️ Something went wrong`，日志里是 `FailoverError: LLM request failed: network connection error (timeout, 408)`。
+
+**原因**：OpenClaw `models.providers.<p>.request.proxy` 在 schema 里存在但**运行时没生效**（至少在 2026.4.15 里 Databricks 路径不读它）。gateway env 一删 proxy，LLM fetch 走直连，GFW 下必 timeout。
+
+**教训**：schema validation 通过 ≠ 功能生效。OpenClaw 有些 config 是"reserved for future"或某些 provider path 专用。改 proxy 类配置必须跟一条"最小闭环冒烟测试"（发一条 Telegram 消息验证 agent 回复），不能只看 `config validate`。
 
 ### 验证
 
 ```powershell
-openclaw browser --json navigate "https://www.huya.com"
-# { "ok": true, "targetId": "...", "url": "https://www.huya.com/" }
+openclaw browser --json navigate "https://www.baidu.com"
+# { "ok": true, "targetId": "...", "url": "https://www.baidu.com/" }
+
+openclaw browser --json navigate "https://www.weibo.com"
+# { "ok": true, ... }   # 任何国内站、国外站都能开
 ```
 
 Telegram 里对 agent 说"打开浏览器 XX 站"，agent 调 browser 工具跳转。做网页自动化、Canvas 取数据、截图发群，都基于这条链路。
 
 ### 附：`openclaw config set --batch-file` 的坑
 
-`--batch-file` 期望 **JSON array of `{path, value}` 操作**，不是 config subtree。搞错了 CLI 会一声不吭地拿当前配置盖一层（但也不是真的 clobber，它是 merge 语义；`"size-drop-vs-last-good"` 警告里那个 8703 基线是虚的，别被吓到）。每次改完先 `openclaw config validate` 再重启。
+`--batch-file` 期望 **JSON array of `{path, value}` 操作**，不是 config subtree。搞错了 CLI 不会报错，而是把当前文件当作"要写入的内容"盖一层（实际是 merge 语义，`"size-drop-vs-last-good"` 警告里那个 8703 基线是虚的，别被吓到）。每次改完先 `openclaw config validate` 再重启。
 
 ## 迁移到新机器
 
