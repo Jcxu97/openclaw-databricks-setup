@@ -585,6 +585,92 @@ OpenClaw 有官方 iOS 和 Android app，装上后手机变成 gateway 的一个
 
 没有切实的拆分动机就别拆，记忆混不混其实一个主 agent 里用 prefix (`#code` / `#journal`) 区分就行。
 
+## Browser 工具 × Clash 代理踩坑记（2026-04-18）
+
+让 Telegram agent "帮我打开浏览器 huya" 时会失败，错误链路踩了两层，都修掉了。
+
+### 现象
+
+`openclaw browser navigate https://www.huya.com` 依次报：
+
+1. `GatewayClientRequestError: Navigation blocked: strict browser SSRF policy cannot be enforced while env proxy variables are set`
+2. 修完一层后：`SsrFBlockedError: Blocked: resolves to private/internal/special-use IP address`
+
+### 根因（两层独立问题叠加）
+
+**第一层：gateway 继承了 proxy env**
+
+`~/.openclaw/start-gateway.ps1` 原本显式 `setx HTTP_PROXY / HTTPS_PROXY = http://127.0.0.1:7897`，这是为了让 **LLM 调用** 和 **Serper MCP** 能走 Clash 出海。但它也污染了**同一个 gateway 进程里的 browser 工具**。Browser 的 SSRF guard 一旦检测到 env 里有 proxy，就没法自己 enforce 目标 IP 检查（流量会被代理劫持），于是 `strict` 策略直接 bail。
+
+**第二层：Clash Verge 的 Fake-IP 劫持 DNS**
+
+Clash Verge 默认用 **Fake-IP 模式** 加速匹配，把任意域名解析成 `198.18.0.0/15` 段的占位 IP（比如 `www.huya.com → 198.18.0.38`）。这个段是 **RFC 2544 benchmarking 保留段**，IANA special-use IP。OpenClaw 的 SSRF guard 看到特殊段地址就拒，不会等到 Clash 接管流量再判断。
+
+### 修法（已落地）
+
+**1. Gateway 进程 env 里不要 proxy**，只给**真正需要出海的上游**单独配：
+
+`~/.openclaw/start-gateway.ps1` 里这三行：
+
+```powershell
+$env:HTTP_PROXY  = $null
+$env:HTTPS_PROXY = $null
+$env:NO_PROXY    = $null
+```
+
+**2. Databricks provider 走 explicit-proxy**（`openclaw.json`）：
+
+```json
+"models": {
+  "providers": {
+    "databricks": {
+      "request": { "proxy": { "mode": "explicit-proxy", "url": "http://127.0.0.1:7897" } }
+    }
+  }
+}
+```
+
+**3. Serper MCP 进程级注入 proxy env**：
+
+```json
+"mcp": { "servers": { "serper": { "env": {
+  "SERPER_API_KEY": "env:SERPER_API_KEY",
+  "HTTP_PROXY": "http://127.0.0.1:7897",
+  "HTTPS_PROXY": "http://127.0.0.1:7897"
+}}}}
+```
+
+**4. Browser SSRF 白名单**（Fake-IP 下国内站绕行）：
+
+```json
+"browser": { "ssrfPolicy": { "allowedHostnames": [
+  "huya.com", "www.huya.com", "m.huya.com",
+  "bilibili.com", "www.bilibili.com",
+  "douyu.com", "www.douyu.com"
+] } }
+```
+
+加新站随时扩这个 array。`openclaw config set --batch-file <patch.json>` 原子更新（patch 文件是 `[{ "path": "...", "value": ... }]` 数组格式）。改完必 `Stop-Process -Force -Id <pid>` + `Start-ScheduledTask -TaskName OpenClawGateway` 才生效，`config set` 提示的 "Restart the gateway to apply" 是字面意思。
+
+### 长期建议（根治 Fake-IP 问题）
+
+**Clash Verge → 设置 → DNS → 把 "模式" 从 "Fake-IP" 改成 "Redir-Host"**（或者直接"关闭 DNS 模块"让系统 DNS 接手）。Redir-Host 模式下域名解析返回真公网 IP，SSRF guard 永远满意。做完以后 `browser.ssrfPolicy.allowedHostnames` 就可以清空。
+
+没改 Clash 的时候新站被拒就加白名单，懒得改 Clash 长期这样用也行。
+
+### 验证
+
+```powershell
+openclaw browser --json navigate "https://www.huya.com"
+# { "ok": true, "targetId": "...", "url": "https://www.huya.com/" }
+```
+
+Telegram 里对 agent 说"打开浏览器 XX 站"，agent 直接调 browser 工具跳转。做网页自动化、Canvas 取数据、截图发群，都基于这条链路。
+
+### 附：`openclaw config set --batch-file` 的坑
+
+`--batch-file` 期望 **JSON array of `{path, value}` 操作**，不是 config subtree。搞错了 CLI 会一声不吭地拿当前配置盖一层（但也不是真的 clobber，它是 merge 语义；`"size-drop-vs-last-good"` 警告里那个 8703 基线是虚的，别被吓到）。每次改完先 `openclaw config validate` 再重启。
+
 ## 迁移到新机器
 
 仓库里有 **`openclaw.example.json`**（脱敏模板）和 **`bootstrap.ps1`**（一键引导）。新机器上：
