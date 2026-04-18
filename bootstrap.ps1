@@ -122,6 +122,10 @@ if (Test-Path $startScript) {
     Write-Host "start-gateway.ps1 missing at $startScript, skipping scheduled task." -ForegroundColor DarkYellow
 }
 
+Write-Host "`nPinning git HTTP proxy so 'git push' works without Clash TUN mode..." -ForegroundColor Cyan
+git config --global http.proxy  "http://127.0.0.1:7897"
+git config --global https.proxy "http://127.0.0.1:7897"
+
 Write-Host "`n=== Bootstrap done ===" -ForegroundColor Yellow
 Write-Host "Next steps:"
 Write-Host "  1. Edit ~/.openclaw/openclaw.json and fill in the placeholders."
