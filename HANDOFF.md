@@ -1,6 +1,6 @@
 # OpenClaw × Databricks × Telegram 部署交接文档
 
-最后更新：2026-04-26 · 环境：Windows 10/11 · PowerShell
+最后更新：2026-04-26 · 环境：Windows 10/11 · PowerShell · Clash Verge Rev
 
 本文档记录在本机把 **OpenClaw** 接入 **Databricks AI Gateway**（Claude Opus 4.7 主 / Sonnet 4.6 备）并通过 **Telegram Bot** 对话的完整配置，重点保留 **代理相关的所有踩坑与最终方案**，方便以后换机、重装、排障时直接照抄。
 
@@ -59,39 +59,120 @@ prepend:
 
 改完后 **点 Clash Verge 的 "重载配置"** 才会生效。
 
-### Clash Verge DNS：别让 53 端口劫持变成断网陷阱（2026-04-26 新增）
+### Clash Verge DNS：多轮踩坑后的最终架构（2026-04-26 完整版）
 
-**背景故事**：某次排障为了让系统走 Clash 的 DoH，把 Windows 网卡 DNS 改成了 `127.0.0.1`。结果 Clash Verge 一关 → 系统 53 端口无人接管 → **所有域名解析失败**（包括国内站、Bing、连 Claude Code 都连不上 API）。这是一个"Clash 挂了 = 断网"的强耦合陷阱。
+一次完整的排障记录，从"Clash 挂了 = 断网"的陷阱，走到最终跨多个机场订阅都稳的架构。
 
-**最终架构（解耦版）**：
+#### 0. 断网陷阱的背景故事
+
+某次为了让系统走 Clash 的 DoH，把 Windows 网卡 DNS 改成了 `127.0.0.1`。Clash 一关 → 系统 53 端口无人接管 → **所有域名解析失败**（国内站、Bing、连 Claude Code 都连不上 API）。
+
+解法走了弯路：先试过"让出 53 端口 + Windows DNS 回滚到路由器 DHCP"，看似解耦，但系统代理模式下 Steam / WeGame 这种**不走 HTTP 代理的原生 TCP 客户端**又挂了。最终回到"Windows DNS 指 Clash，Clash 必须活着"，但用**双 DNS 主备**降级。
+
+#### 1. 最终架构表
 
 | 层 | 配置 | 作用 |
 | --- | --- | --- |
-| Windows 网卡 DNS | DHCP（= 路由器，例如 `192.168.31.1`） | Clash 挂了也能解析国内站，不断网 |
-| Clash `dns.listen` | `127.0.0.1:5335` | 让出 53 端口，Clash 只给自己内部用 |
-| `sniffer.enable` | `true`（force-dns-mapping + parse-pure-ip + override-destination） | 从 TLS SNI / HTTP Host 还原真实域名，即便系统拿到的是污染 IP 也能救回来 |
+| Windows 网卡 DNS | **主 `127.0.0.1`** + **备 `192.168.31.1`**（路由器） | 平时走 Clash；Clash 崩了 Windows 自动切备，不至于全断 |
+| Clash `dns.listen` | `127.0.0.1:53` | 接管系统 DNS 查询 |
+| `dns.enhanced-mode` | **`redir-host`**（不是 fake-ip！） | **关键**：让 Steam/WeGame 这种直接 TCP 连 IP 的客户端拿到**真实 IP**，能走 ISP 路由直连 |
+| `sniffer.enable` | `true` | TLS SNI / HTTP Host 还原域名，浏览器连假 IP 也能救回来 |
 | `dns.nameserver` | DoH 阿里/腾讯 | 国内走直连 DoH |
-| `dns.fallback` | Cloudflare/Google DoH，经 `🚀 节点选择` | 境外域名走代理 DoH，防污染 |
+| `dns.nameserver-policy` | Steam / 机场节点域名**强制走国内 DoH** | 绕开 fallback-filter 的陷阱（见 §3） |
+| `dns.fallback` | `1.1.1.1` / `162.159.36.1`（**不加 `#proxy-group`**） | 跨 profile 兼容（见 §4） |
 
-**Clash Verge Rev 配置文件位置**（替换 `%APPDATA%` 为你的）：
+#### 2. redir-host vs fake-ip 的教训
+
+**fake-ip** 把所有域名解析成 `198.18.x.x` 的假 IP。好处：彻底避开 DNS 污染。坏处：**非 TUN 模式下，原生 TCP 客户端（Steam CM / WeGame / Telegram 桌面版等）拿到假 IP 后直接 TCP 连假 IP，Windows 路由表没有 `198.18.0.0/15` → 数据包发不出去 → 完全失败**。
+
+**redir-host** 返回真实 IP。浏览器走系统代理，Clash 按 hostname 分流（真实 IP 无关紧要）；原生客户端拿真实 IP 走 ISP 直连。Steam CM 只要 ISP 到 Steam 服务器的路由通，就能工作。
+
+**铁律**：**系统代理模式（不开 TUN）下必须用 redir-host，否则 Steam 等客户端挂掉。** 只有开 TUN 模式 fake-ip 才能工作。
+
+#### 3. fallback-filter 的"机场节点被踢掉"陷阱
+
+Clash 的 `fallback-filter` 默认这样设：
+```yaml
+fallback-filter:
+  geoip: true
+  geoip-code: CN     # 要求结果 IP 在中国
+  geosite: [gfw]     # gfw 域名强制用 fallback
+```
+
+含义："nameserver 查出来的 IP 不是 CN 就视为被污染，改用 fallback"。**陷阱在于机场自己的节点域名**——它们解析到海外 IP 是正常的，但被 fallback-filter 当成"污染"踢到 fallback，fallback 又连不上（`1.1.1.1` 在某些 ISP 下直连会卡），于是节点全部 ping 不通。
+
+**症状**：某个 profile 突然"所有节点都不通"，但换到别的 profile 又好了。  
+**解法**：用 `nameserver-policy` 给机场常用的奇葩 TLD 白名单，跳过 fallback：
+
+```yaml
+nameserver-policy:
+  "+.sbs": [https://dns.alidns.com/dns-query, 223.5.5.5]  # AmyTelecom 等机场用
+  "+.cv":  [https://dns.alidns.com/dns-query, 223.5.5.5]  # NFCLOUD 等机场用
+```
+
+机场一般用 cheap TLD 隐藏：`.sbs` / `.cv` / `.top` / `.xyz` 等。不认路就看一次订阅里 `proxies:` 段，把出现的 TLD 都加白名单。
+
+#### 4. 跨 profile 兼容：绝对不要在 Merge.yaml 里引用"代理组名"
+
+**Merge.yaml 是全局的**，对所有 profile 都生效。但每个订阅的代理组命名完全不同：
+
+| NFCLOUD | AmyTelecom |
+| --- | --- |
+| `🚀 节点选择` | `Proxies` |
+| `🎯 全球直连` | `🎯Direct` |
+| `Ⓜ️ 微软服务` | `Microsoft` |
+| `♻️ 自动选择` | `✈️Final` |
+
+**如果在 Merge.yaml 写了 `prepend-rules:` 引用 `🚀 节点选择`**，切到 AmyTelecom 时这个组不存在 → **整个 profile 加载失败，所有节点超时**。
+
+同样地，`dns.fallback` 里**不能用 `#代理组名` 后缀**：
+
+```yaml
+fallback:
+  # ❌ 错：- https://1.1.1.1/dns-query#🚀 节点选择
+  # ✅ 对：直接不加后缀，靠 Clash 自动路由
+  - https://1.1.1.1/dns-query
+  - https://162.159.36.1/dns-query
+```
+
+**原则**：Merge.yaml 只放"**代理组名无关**"的通用配置（DNS、sniffer、listen 端口、协议嗅探规则）。域名 → 组的分流交给**各订阅自带规则**（订阅里引用的组名肯定存在于自己的组定义里）。
+
+#### 5. 机场节点特性差异（实测）
+
+| | NFCLOUD | AmyTelecom |
+| --- | --- | --- |
+| DNS 模式默认 | `fake-ip`（订阅自带，必须被 Merge 覆盖为 redir-host） | `redir-host`（默认） |
+| 代理组主名 | `🚀 节点选择` | `Proxies` |
+| 流媒体组 | 个别几个 | Netflix/HBO/Disney/YouTube/Bahamut/Bilibili/MyTVSuper/Tiktok |
+| 游戏平台组 | 无 | **`Steam` / `Epic` / `Xbox` / `PlayStation`**（专门组）|
+| Bing 默认 | 微软服务组默认 DIRECT，**会访问不通**，需在 GUI 切到节点 | 自带 Microsoft 组，默认正常 |
+| Steam 商店/API | 能用（台湾 01 实测 OK） | 能用 |
+| 节点域名 TLD | `.cv` | `.sbs` |
+
+#### 6. 配置文件位置与合并顺序
 
 ```
 %APPDATA%\io.github.clash-verge-rev.clash-verge-rev\
 ├── profiles\
-│   ├── Merge.yaml          ← 全局合并模板，DNS / sniffer 强化写这里
+│   ├── Merge.yaml          ← 全局合并模板（这里写通用改造）
 │   ├── <profile-id>.yaml   ← 远程订阅（刷新会重写，别在这改）
-│   └── <profile-id>-merge.yaml ← 专属 merge（优先级最高）
+│   ├── <profile-id>-merge.yaml ← 专属 merge（profile 级，可覆盖全局）
+│   └── ...
 └── clash-verge.yaml        ← 合并后的最终生效配置（只读参考，别手改）
 ```
 
-**合并顺序**（后覆盖前）：远程订阅 → `Merge.yaml` → profile 专属 merge → script.js → `clash-verge.yaml`。所以**刷新订阅不会丢 Merge.yaml 里的改动**。
+**合并顺序**（后覆盖前）：远程订阅 → `Merge.yaml` → profile 专属 merge → script.js → `clash-verge.yaml`。  
+所以刷新订阅**不会丢 Merge.yaml 里的改动**。改完 Merge.yaml 必须到 Verge → Profiles 页 → 当前 profile 右键**激活/刷新**才会生效（不会自动热加载）。
 
-**`profiles\Merge.yaml` 关键片段**：
+#### 7. 最终 Merge.yaml
 
 ```yaml
+# Profile Enhancement Merge Template for Clash Verge
+
 profile:
   store-selected: true
 
+# TLS/HTTP/QUIC 流量嗅探：从握手中抓回真实域名
 sniffer:
   enable: true
   force-dns-mapping: true
@@ -108,20 +189,31 @@ sniffer:
 
 dns:
   enable: true
-  listen: 127.0.0.1:5335      # ← 关键：不抢 53 端口
+  listen: 127.0.0.1:53
   use-hosts: true
   use-system-hosts: false
-  enhanced-mode: fake-ip
-  fake-ip-range: 198.18.0.1/15
+  enhanced-mode: redir-host       # ← Steam/WeGame 能用的关键
   default-nameserver:
     - 223.5.5.5
     - 119.29.29.29
   nameserver:
     - https://doh.pub/dns-query
     - https://dns.alidns.com/dns-query
+  nameserver-policy:
+    # 机场节点专用奇葩 TLD（fallback-filter 会把它们当污染踢掉）
+    "+.sbs": [https://dns.alidns.com/dns-query, 223.5.5.5]
+    "+.cv":  [https://dns.alidns.com/dns-query, 223.5.5.5]
+    # Steam 域名强制走国内 DoH，避免 fallback 经机场节点时被 DNS 屏蔽导致 SERVFAIL
+    "+.steampowered.com":  [https://dns.alidns.com/dns-query, https://doh.pub/dns-query]
+    "+.steamcommunity.com":[https://dns.alidns.com/dns-query, https://doh.pub/dns-query]
+    "+.steamstatic.com":   [https://dns.alidns.com/dns-query, https://doh.pub/dns-query]
+    "+.steamgames.com":    [https://dns.alidns.com/dns-query, https://doh.pub/dns-query]
+    "+.steamcontent.com":  [https://dns.alidns.com/dns-query, https://doh.pub/dns-query]
+    "+.akamaihd.net":      [https://dns.alidns.com/dns-query, https://doh.pub/dns-query]
   fallback:
-    - https://1.1.1.1/dns-query#🚀 节点选择
-    - https://8.8.8.8/dns-query#🚀 节点选择
+    # 关键：不加 "#代理组" 后缀（不同 profile 组名不同，加了会让 profile 加载失败）
+    - https://1.1.1.1/dns-query
+    - https://162.159.36.1/dns-query
   fallback-filter:
     geoip: true
     geoip-code: CN
@@ -129,37 +221,56 @@ dns:
     ipcidr:
       - 240.0.0.0/4
       - 0.0.0.0/32
+
+# 不写 prepend-rules！Steam/Bing/Microsoft 分流交给各订阅自带的规则处理
+# （写了会引用到在另一个 profile 不存在的代理组，导致切 profile 时全超时）
 ```
 
-**改完之后**：Verge → Profiles 页 → 右键当前 profile 点**激活/刷新**（Merge 模板改动不会自动热加载）。
-
-**回滚系统 DNS 到 DHCP**（必须**管理员** PowerShell，普通窗口会报 `requires elevation`）：
+#### 8. Windows DNS 切换命令（必须管理员 PowerShell）
 
 ```powershell
-# Win+X → "终端（管理员）"，带盾牌图标 🛡️
-# 先验证是不是真管理员：
+# 确认是管理员（返回 True 才继续）
 ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-# True 才继续
 
-netsh interface ipv4 set dnsservers name="WLAN" source=dhcp
-netsh interface ipv4 set dnsservers name="以太网 2" source=dhcp
+# 设置主 Clash + 备路由器（主备结构）
+netsh interface ipv4 set dnsservers name="WLAN"   source=static addr=127.0.0.1    validate=no
+netsh interface ipv4 add dnsservers name="WLAN"   addr=192.168.31.1 index=2      validate=no
+netsh interface ipv4 set dnsservers name="以太网 2" source=static addr=127.0.0.1    validate=no
+netsh interface ipv4 add dnsservers name="以太网 2" addr=192.168.31.1 index=2      validate=no
 Clear-DnsClientCache
+
+# 验证
 Get-DnsClientServerAddress -AddressFamily IPv4 |
   Where-Object InterfaceAlias -in "WLAN","以太网 2" |
   Format-Table InterfaceAlias, ServerAddresses -AutoSize
+# 期望：{127.0.0.1, 192.168.31.1}
 ```
 
-期望看到 `ServerAddresses = {192.168.31.1}`（或你路由器 IP），**不是** `{127.0.0.1}`。
+回滚（如果要回 DHCP）：把上面的 `set dnsservers ... source=static addr=127.0.0.1` 换成 `set dnsservers ... source=dhcp`，并删掉 `add` 那两行。
 
-**端口体检**（重载 profile 后）：
+#### 9. 诊断三板斧
 
 ```powershell
-Get-NetTCPConnection -LocalPort 53 -ErrorAction SilentlyContinue
-Get-NetUDPEndpoint   -LocalPort 53 -ErrorAction SilentlyContinue   # 应该都为空
-Get-NetUDPEndpoint   -LocalPort 5335 -ErrorAction SilentlyContinue # 应该是 verge-mihomo
+# ① 谁在监听 53 和 7897
+Get-NetTCPConnection -LocalPort 53,7897 -State Listen -EA SilentlyContinue |
+  Select LocalAddress,LocalPort,OwningProcess
+Get-NetUDPEndpoint -LocalPort 53 -EA SilentlyContinue |
+  Select LocalAddress,LocalPort,OwningProcess
+
+# ② Clash DNS 能否解析关键域名
+Resolve-DnsName store.steampowered.com -Server 127.0.0.1 -QuickTimeout
+Resolve-DnsName www.baidu.com          -Server 127.0.0.1 -QuickTimeout
+
+# ③ 通过 Clash 代理 head-request 测试（看代理路径是否通）
+Invoke-WebRequest -Uri 'https://www.baidu.com/'          -Proxy 'http://127.0.0.1:7897' -Method Head -UseBasicParsing -TimeoutSec 8
+Invoke-WebRequest -Uri 'https://www.google.com/'         -Proxy 'http://127.0.0.1:7897' -Method Head -UseBasicParsing -TimeoutSec 8
+Invoke-WebRequest -Uri 'https://store.steampowered.com/' -Proxy 'http://127.0.0.1:7897' -Method Head -UseBasicParsing -TimeoutSec 8
 ```
 
-**为什么这套架构仍然能访问 Google**：系统代理模式下，浏览器把请求送到 `127.0.0.1:7897` → Clash 从 TLS Client Hello 里的 SNI 嗅到真实域名 `google.com` → 按规则分流到 `🚀 节点选择` → 通过节点用 Cloudflare DoH 解析 + 代理出去。系统 DNS 是啥（甚至是不是污染的）都无所谓。
+结果解读：
+- ① 53/UDP 是 `verge-mihomo`、7897 也是它 → Clash 正常接管
+- ② 能解析出真实 IP（不是 198.18.x.x）→ redir-host 模式正确
+- ③ 国内站 + Google + Steam 都 HTTP 200 → 全链路通。任一超时 → 看当前代理组选的节点有没有屏蔽该域名
 
 ---
 
