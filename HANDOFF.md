@@ -1,6 +1,6 @@
 # OpenClaw × Databricks × Telegram 部署交接文档
 
-最后更新：2026-04-18 · 环境：Windows 10 (win32 10.0.19045) · PowerShell
+最后更新：2026-04-26 · 环境：Windows 10/11 · PowerShell
 
 本文档记录在本机把 **OpenClaw** 接入 **Databricks AI Gateway**（Claude Opus 4.7 主 / Sonnet 4.6 备）并通过 **Telegram Bot** 对话的完整配置，重点保留 **代理相关的所有踩坑与最终方案**，方便以后换机、重装、排障时直接照抄。
 
@@ -58,6 +58,110 @@ prepend:
 ```
 
 改完后 **点 Clash Verge 的 "重载配置"** 才会生效。
+
+### Clash Verge DNS：别让 53 端口劫持变成断网陷阱（2026-04-26 新增）
+
+**背景故事**：某次排障为了让系统走 Clash 的 DoH，把 Windows 网卡 DNS 改成了 `127.0.0.1`。结果 Clash Verge 一关 → 系统 53 端口无人接管 → **所有域名解析失败**（包括国内站、Bing、连 Claude Code 都连不上 API）。这是一个"Clash 挂了 = 断网"的强耦合陷阱。
+
+**最终架构（解耦版）**：
+
+| 层 | 配置 | 作用 |
+| --- | --- | --- |
+| Windows 网卡 DNS | DHCP（= 路由器，例如 `192.168.31.1`） | Clash 挂了也能解析国内站，不断网 |
+| Clash `dns.listen` | `127.0.0.1:5335` | 让出 53 端口，Clash 只给自己内部用 |
+| `sniffer.enable` | `true`（force-dns-mapping + parse-pure-ip + override-destination） | 从 TLS SNI / HTTP Host 还原真实域名，即便系统拿到的是污染 IP 也能救回来 |
+| `dns.nameserver` | DoH 阿里/腾讯 | 国内走直连 DoH |
+| `dns.fallback` | Cloudflare/Google DoH，经 `🚀 节点选择` | 境外域名走代理 DoH，防污染 |
+
+**Clash Verge Rev 配置文件位置**（替换 `%APPDATA%` 为你的）：
+
+```
+%APPDATA%\io.github.clash-verge-rev.clash-verge-rev\
+├── profiles\
+│   ├── Merge.yaml          ← 全局合并模板，DNS / sniffer 强化写这里
+│   ├── <profile-id>.yaml   ← 远程订阅（刷新会重写，别在这改）
+│   └── <profile-id>-merge.yaml ← 专属 merge（优先级最高）
+└── clash-verge.yaml        ← 合并后的最终生效配置（只读参考，别手改）
+```
+
+**合并顺序**（后覆盖前）：远程订阅 → `Merge.yaml` → profile 专属 merge → script.js → `clash-verge.yaml`。所以**刷新订阅不会丢 Merge.yaml 里的改动**。
+
+**`profiles\Merge.yaml` 关键片段**：
+
+```yaml
+profile:
+  store-selected: true
+
+sniffer:
+  enable: true
+  force-dns-mapping: true
+  parse-pure-ip: true
+  override-destination: true
+  sniff:
+    HTTP: { ports: [80, 8080-8880] }
+    TLS:  { ports: [443, 8443] }
+    QUIC: { ports: [443] }
+  skip-domain:
+    - Mijia Cloud
+    - dlg.io.mi.com
+    - +.push.apple.com
+
+dns:
+  enable: true
+  listen: 127.0.0.1:5335      # ← 关键：不抢 53 端口
+  use-hosts: true
+  use-system-hosts: false
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/15
+  default-nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+  nameserver:
+    - https://doh.pub/dns-query
+    - https://dns.alidns.com/dns-query
+  fallback:
+    - https://1.1.1.1/dns-query#🚀 节点选择
+    - https://8.8.8.8/dns-query#🚀 节点选择
+  fallback-filter:
+    geoip: true
+    geoip-code: CN
+    geosite: [gfw]
+    ipcidr:
+      - 240.0.0.0/4
+      - 0.0.0.0/32
+```
+
+**改完之后**：Verge → Profiles 页 → 右键当前 profile 点**激活/刷新**（Merge 模板改动不会自动热加载）。
+
+**回滚系统 DNS 到 DHCP**（必须**管理员** PowerShell，普通窗口会报 `requires elevation`）：
+
+```powershell
+# Win+X → "终端（管理员）"，带盾牌图标 🛡️
+# 先验证是不是真管理员：
+([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+# True 才继续
+
+netsh interface ipv4 set dnsservers name="WLAN" source=dhcp
+netsh interface ipv4 set dnsservers name="以太网 2" source=dhcp
+Clear-DnsClientCache
+Get-DnsClientServerAddress -AddressFamily IPv4 |
+  Where-Object InterfaceAlias -in "WLAN","以太网 2" |
+  Format-Table InterfaceAlias, ServerAddresses -AutoSize
+```
+
+期望看到 `ServerAddresses = {192.168.31.1}`（或你路由器 IP），**不是** `{127.0.0.1}`。
+
+**端口体检**（重载 profile 后）：
+
+```powershell
+Get-NetTCPConnection -LocalPort 53 -ErrorAction SilentlyContinue
+Get-NetUDPEndpoint   -LocalPort 53 -ErrorAction SilentlyContinue   # 应该都为空
+Get-NetUDPEndpoint   -LocalPort 5335 -ErrorAction SilentlyContinue # 应该是 verge-mihomo
+```
+
+**为什么这套架构仍然能访问 Google**：系统代理模式下，浏览器把请求送到 `127.0.0.1:7897` → Clash 从 TLS Client Hello 里的 SNI 嗅到真实域名 `google.com` → 按规则分流到 `🚀 节点选择` → 通过节点用 Cloudflare DoH 解析 + 代理出去。系统 DNS 是啥（甚至是不是污染的）都无所谓。
+
+---
 
 ### TUN 模式 vs 系统代理
 
