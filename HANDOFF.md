@@ -10,8 +10,8 @@
 | --- | --- |
 | Node.js | 24.15.0 LTS（`winget` 安装，`C:\Program Files\nodejs`） |
 | Git | 2.53（`winget` 安装，`C:\Program Files\Git\cmd`） |
-| OpenClaw CLI | 全局 npm 安装，入口 `C:\Users\AMD\AppData\Roaming\npm\openclaw.cmd` |
-| OpenClaw 配置 | `C:\Users\AMD\.openclaw\openclaw.json` |
+| OpenClaw CLI | 全局 npm 安装，入口 `%APPDATA%\npm\openclaw.cmd` |
+| OpenClaw 配置 | `%USERPROFILE%\.openclaw\openclaw.json` |
 | 代理客户端 | Clash Verge（混合端口 `7897`，支持 TUN 模式 + 系统代理） |
 | Telegram Bot | `@Jcxu_claude_bot` |
 
@@ -248,7 +248,38 @@ Select-String -Path "$env:APPDATA\io.github.clash-verge-rev.clash-verge-rev\clas
 
 **修法**：`verge.yaml` 里把 `enable_dns_settings` 设为 `true`，重启 Clash Verge。
 
-**教训**：`dns_config.yaml` 只是"建议"，`verge.yaml` 的 `enable_dns_settings` 才是"执行开关”。改完 `dns_config.yaml` 后必须验证编译产物 `clash-verge.yaml` 是否反映了改动。
+**教训**：`dns_config.yaml` 只是”建议”，`verge.yaml` 的 `enable_dns_settings` 才是”执行开关”。改完 `dns_config.yaml` 后必须验证编译产物 `clash-verge.yaml` 是否反映了改动。
+
+#### ⚠️ Merge.yaml vs `dns_config.yaml` 合并冲突风险
+
+Clash Verge Rev 有两个地方可以定义 DNS 配置：
+
+| 文件 | 作用 |
+| --- | --- |
+| `%APPDATA%\...\dns_config.yaml` | Clash Verge 的 DNS 专用配置面板 |
+| `%APPDATA%\...\profiles\Merge.yaml` | 全局合并模板（§7 的最终配置写在这里） |
+
+两者都定义 `dns:` 段时，**编译顺序决定谁覆盖谁**。实测发现 `dns_config.yaml` 的优先级可能高于 Merge.yaml（即 `dns_config.yaml` 里的 `fake-ip` 会覆盖 Merge.yaml 的 `redir-host`）。
+
+**铁律**：改 DNS 配置时**两个文件都要检查**，确保 `enhanced-mode`、`listen`、`nameserver` 等关键字段一致。编译后验证 `clash-verge.yaml` 的最终值。
+
+#### ⚠️ fallback DNS 连通性注意
+
+§7 的 fallback 配置用的是 Cloudflare DoH（`1.1.1.1` / `162.159.36.1`）。在国内部分 ISP 下，直连 Cloudflare 可能被 QoS 限速甚至阻断，导致 fallback 形同虚设。
+
+**症状**：`geosite: [gfw]` 域名（如 Google/YouTube）解析超时，但国内域名正常。
+
+**排查**：
+
+```powershell
+# 测试 fallback DNS 是否可达
+nslookup google.com 1.1.1.1
+# 超时 → fallback 不通，需要换备用 DNS 或确保 fallback 走代理
+```
+
+**修法**（二选一）：
+1. 在 Clash Verge 的代理规则里确保 `1.1.1.1` / `162.159.36.1` 走代理节点（不走直连）
+2. 换用国内可达的 fallback，如 `tls://8.8.8.8`（需确认 ISP 没封 853 端口）或 `https://dns.google/dns-query`（走代理）
 
 #### 8. Windows DNS 切换命令（必须管理员 PowerShell）
 
@@ -405,8 +436,8 @@ openclaw gateway --port 18789 --verbose
 如果某天 PATH 出问题，用绝对路径兜底：
 
 ```powershell
-$env:Path = "C:\Program Files\Git\cmd;C:\Program Files\nodejs;C:\Users\AMD\AppData\Roaming\npm;" + $env:Path
-& "C:\Users\AMD\AppData\Roaming\npm\openclaw.cmd" gateway --port 18789 --verbose
+$env:Path = "C:\Program Files\Git\cmd;C:\Program Files\nodejs;$env:APPDATA\npm;" + $env:Path
+& "$env:APPDATA\npm\openclaw.cmd" gateway --port 18789 --verbose
 ```
 
 ## 踩过的坑 · 速查表
@@ -445,7 +476,7 @@ setx SERPER_API_KEY "472d************"
 "mcp": {
   "servers": {
     "serper": {
-      "command": "C:\\Users\\AMD\\AppData\\Roaming\\npm\\serper-mcp.cmd",
+      "command": "%APPDATA%\\npm\\serper-mcp.cmd",
       "args": [],
       "env": { "SERPER_API_KEY": "472d************" }
     }
@@ -479,11 +510,11 @@ setx SERPER_API_KEY "472d************"
 ```powershell
 npm install -g node-llama-cpp
 cmd /c "mklink /J `
-  `"C:\Users\AMD\AppData\Roaming\npm\node_modules\openclaw\node_modules\node-llama-cpp`" `
-  `"C:\Users\AMD\AppData\Roaming\npm\node_modules\node-llama-cpp`""
+  `"$env:APPDATA\npm\node_modules\openclaw\node_modules\node-llama-cpp`" `
+  `"$env:APPDATA\npm\node_modules\node-llama-cpp`""
 ```
 
-首次 `openclaw memory index` 会从 Hugging Face 下载 328 MB 模型到 `~\.node-llama-cpp\models\`，之后全本地。记忆内容写在 `C:\Users\AMD\.openclaw\workspace\MEMORY.md`，每次 index 后 `openclaw memory search "xx"` 能跨会话召回。
+首次 `openclaw memory index` 会从 Hugging Face 下载 328 MB 模型到 `~\.node-llama-cpp\models\`，之后全本地。记忆内容写在 `%USERPROFILE%\.openclaw\workspace\MEMORY.md`，每次 index 后 `openclaw memory search "xx"` 能跨会话召回。
 
 验证状态：`openclaw memory status` 应该输出 `Provider: local` / `Vector: ready` / `FTS: ready`。
 
@@ -502,15 +533,15 @@ Key 没错、proxy 没错，纯 OpenClaw 上游 bug。**换路线走本地 whisp
 ```powershell
 gh release download v1.8.4 --repo ggerganov/whisper.cpp `
   --pattern "whisper-blas-bin-x64.zip" `
-  --dir "C:\Users\AMD\.openclaw\whisper"
-Expand-Archive "C:\Users\AMD\.openclaw\whisper\whisper-blas-bin-x64.zip" `
-  -DestinationPath "C:\Users\AMD\.openclaw\whisper\bin" -Force
+  --dir "$env:USERPROFILE\.openclaw\whisper"
+Expand-Archive "$env:USERPROFILE\.openclaw\whisper\whisper-blas-bin-x64.zip" `
+  -DestinationPath "$env:USERPROFILE\.openclaw\whisper\bin" -Force
 Invoke-WebRequest `
   -Uri "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin" `
-  -OutFile "C:\Users\AMD\.openclaw\whisper\ggml-base.bin"
+  -OutFile "$env:USERPROFILE\.openclaw\whisper\ggml-base.bin"
 ```
 
-`whisper-cli.exe` 落在 `C:\Users\AMD\.openclaw\whisper\bin\Release\`，模型 148 MB。
+`whisper-cli.exe` 落在 `%USERPROFILE%\.openclaw\whisper\bin\Release\`，模型 148 MB。
 
 OpenClaw 的 config 路径是 **`tools.media.audio.models`**（`audio.transcription` 是 legacy，会被 doctor 自动迁移），显式写进 `openclaw.json`：
 
@@ -524,9 +555,9 @@ OpenClaw 的 config 路径是 **`tools.media.audio.models`**（`audio.transcript
       "models": [
         {
           "type": "cli",
-          "command": "C:\\Users\\AMD\\.openclaw\\whisper\\bin\\Release\\whisper-cli.exe",
+          "command": "%USERPROFILE%\\.openclaw\\whisper\\bin\\Release\\whisper-cli.exe",
           "args": [
-            "-m", "C:\\Users\\AMD\\.openclaw\\whisper\\ggml-base.bin",
+            "-m", "%USERPROFILE%\\.openclaw\\whisper\\ggml-base.bin",
             "-otxt", "-of", "{{OutputBase}}",
             "-np", "-nt",
             "{{MediaPath}}"
@@ -544,8 +575,8 @@ OpenClaw 的 config 路径是 **`tools.media.audio.models`**（`audio.transcript
 **额外加持**：OpenClaw 还支持环境变量自动发现——只要 `whisper-cli` 在 PATH 里 + `WHISPER_CPP_MODEL` 指向模型，无需显式配置也会自动挂上（见 `dist/runner-GjYg-C-v.js` 的 `resolveLocalWhisperCppEntry`）。我们两条路都配了，双保险：
 
 ```powershell
-setx WHISPER_CPP_MODEL "C:\Users\AMD\.openclaw\whisper\ggml-base.bin"
-# Path 追加 C:\Users\AMD\.openclaw\whisper\bin\Release
+setx WHISPER_CPP_MODEL "$env:USERPROFILE\.openclaw\whisper\ggml-base.bin"
+# Path 追加 %USERPROFILE%\.openclaw\whisper\bin\Release
 ```
 
 验证：
@@ -672,8 +703,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File health-check.ps1
 
 BotFather 侧已经注册了 5 个 slash command（Telegram 客户端输入框左下角 `/` 菜单可以直接点选）：`/status` `/logs` `/restart` `/mem` `/ip`。OpenClaw 本身不支持用户自定义 slash command 路由，所以这些命令的"语义"是靠两层机制保证的：
 
-1. **AGENTS.md 里的硬绑定**（`C:\Users\AMD\.openclaw\workspace\AGENTS.md` 的 "Leo Operator Commands (binding)" 段）。OpenClaw 每次 session startup 都会整文件加载 `AGENTS.md` 到 system context，所以这段规则在上下文里是"始终存在"，不依赖向量检索命中。文件里同时写死了"只在 Telegram DM 且发件人是 Leo 时"才执行，避免在群聊、CLI、hooks 等路径上被触发。
-2. **MEMORY.md 里的软规则**（`C:\Users\AMD\.openclaw\workspace\MEMORY.md` 的 "Telegram 操作约定" 段）。作为语义检索的回退，方便未来 agent 被注入到别的 workspace 时仍能通过 memory search 召回。
+1. **AGENTS.md 里的硬绑定**（`%USERPROFILE%\.openclaw\workspace\AGENTS.md` 的 "Leo Operator Commands (binding)" 段）。OpenClaw 每次 session startup 都会整文件加载 `AGENTS.md` 到 system context，所以这段规则在上下文里是"始终存在"，不依赖向量检索命中。文件里同时写死了"只在 Telegram DM 且发件人是 Leo 时"才执行，避免在群聊、CLI、hooks 等路径上被触发。
+2. **MEMORY.md 里的软规则**（`%USERPROFILE%\.openclaw\workspace\MEMORY.md` 的 "Telegram 操作约定" 段）。作为语义检索的回退，方便未来 agent 被注入到别的 workspace 时仍能通过 memory search 召回。
 
 改命令表：直接编辑 `AGENTS.md` 的 Leo Operator Commands 段（不必 reindex，下次对话就生效）；同步改 `MEMORY.md` 并 `openclaw memory index` 让软规则保持一致。改客户端菜单要直接调 Telegram API：
 
@@ -734,7 +765,7 @@ PowerShell 5 默认 `$OutputEncoding` 在简体中文系统上是 GBK/936，但 
 | Issue | https://github.com/openclaw/openclaw/issues/68294 | 完整 trace、跨 realm FormData 验证、修复草案 |
 | PR | https://github.com/openclaw/openclaw/pull/68318 | fork `Jcxu97/openclaw`，分支 `fix/audio-transcribe-cross-realm-formdata`，一 commit 含修复 + regression test（2/2 pass，revert-patch 验证可复现原 bug） |
 
-本地 fork 的 clone 在 `C:\Users\AMD\Desktop\oss\openclaw`。要继续改动：`git fetch upstream; git rebase upstream/main`，改完 `git push --force origin fix/audio-transcribe-cross-realm-formdata` 就自动更新 PR。
+本地 fork 的 clone 在 `%USERPROFILE%\Desktop\oss\openclaw`。要继续改动：`git fetch upstream; git rebase upstream/main`，改完 `git push --force origin fix/audio-transcribe-cross-realm-formdata` 就自动更新 PR。
 
 **等 PR merge + 新版发布后要做的**：`npm i -g openclaw@latest`，把 `tools.media.audio.models` 改回 `[{ "type": "provider", "ref": "groq/whisper-large-v3-turbo" }]`，Telegram 语音就能切到 Groq Turbo（延迟降一个数量级、中文识别更准）。
 
@@ -910,14 +941,6 @@ Clear-DnsClientCache
 这一步**是 tradeoff**：开了以后 browser 能 navigate 任何地址，包括私有段 / loopback / special-use。prompt injection 下 agent 理论上可以去探你家路由器管理页。你这台机是单人 `security=full ask=off` 模式，本来就是"信任 agent"姿态，多这一档风险可以接受。如果哪天把 gateway 开放给不信任的人，**把 dangerouslyAllowPrivateNetwork 改回 false，维护 allowedHostnames 白名单**。
 
 改完 `openclaw config set --batch-file <patch.json>` 然后 `Stop-Process` + `Start-ScheduledTask OpenClawGateway`。
-
-### 尝试过的失败方案（供后人避坑）
-
-初版想"按子系统拆 proxy"：gateway env 删 proxy，databricks provider 用 `request.proxy.mode = "explicit-proxy"`，Serper MCP 用 `mcp.servers.serper.env.HTTPS_PROXY` 单独注入。结果 gateway 重启后 Telegram agent 秒回 `⚠️ Something went wrong`，日志里是 `FailoverError: LLM request failed: network connection error (timeout, 408)`。
-
-**原因**：OpenClaw `models.providers.<p>.request.proxy` 在 schema 里存在但**运行时没生效**（至少在 2026.4.15 里 Databricks 路径不读它）。gateway env 一删 proxy，LLM fetch 走直连，GFW 下必 timeout。
-
-**教训**：schema validation 通过 ≠ 功能生效。OpenClaw 有些 config 是"reserved for future"或某些 provider path 专用。改 proxy 类配置必须跟一条"最小闭环冒烟测试"（发一条 Telegram 消息验证 agent 回复），不能只看 `config validate`。
 
 ### 验证
 

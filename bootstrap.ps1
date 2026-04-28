@@ -88,7 +88,7 @@ if (-not (Test-Path $cfgDst)) {
     Write-Host "      - DATABRICKS_PAT, workspace host"
     Write-Host "      - TELEGRAM_BOT_TOKEN, TELEGRAM_USER_ID"
     Write-Host "      - SERPER_API_KEY"
-    Write-Host "      - Whisper paths if <YOU> isn't AMD"
+    Write-Host "      - Whisper paths if username isn't correct"
 } else {
     Write-Host "openclaw.json already exists, not overwriting." -ForegroundColor Green
 }
@@ -125,6 +125,21 @@ if (Test-Path $startScript) {
 Write-Host "`nPinning git HTTP proxy so 'git push' works without Clash TUN mode..." -ForegroundColor Cyan
 git config --global http.proxy  "http://127.0.0.1:7897"
 git config --global https.proxy "http://127.0.0.1:7897"
+
+# 7. Clash Verge: ensure enable_dns_settings is true so dns_config.yaml takes effect
+$vergeYaml = "$env:APPDATA\io.github.clash-verge-rev.clash-verge-rev\verge.yaml"
+if (Test-Path $vergeYaml) {
+    $content = Get-Content $vergeYaml -Raw
+    if ($content -match 'enable_dns_settings:\s*null' -or $content -match 'enable_dns_settings:\s*false') {
+        $content = $content -replace 'enable_dns_settings:\s*(null|false)', 'enable_dns_settings: true'
+        Set-Content $vergeYaml -Value $content -Encoding UTF8
+        Write-Host "Set enable_dns_settings: true in verge.yaml (dns_config.yaml will now take effect)." -ForegroundColor Green
+    } else {
+        Write-Host "enable_dns_settings already set in verge.yaml." -ForegroundColor Green
+    }
+} else {
+    Write-Host "verge.yaml not found at $vergeYaml, skipping DNS settings check." -ForegroundColor DarkYellow
+}
 
 Write-Host "`n=== Bootstrap done ===" -ForegroundColor Yellow
 Write-Host "Next steps:"
