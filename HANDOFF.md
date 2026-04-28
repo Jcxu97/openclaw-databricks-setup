@@ -1,6 +1,6 @@
 # OpenClaw × Databricks × Telegram 部署交接文档
 
-最后更新：2026-04-26 · 环境：Windows 10/11 · PowerShell · Clash Verge Rev
+最后更新：2026-04-29 · 环境：Windows 10/11 · PowerShell · Clash Verge Rev
 
 本文档记录在本机把 **OpenClaw** 接入 **Databricks AI Gateway**（Claude Opus 4.7 主 / Sonnet 4.6 备）并通过 **Telegram Bot** 对话的完整配置，重点保留 **代理相关的所有踩坑与最终方案**，方便以后换机、重装、排障时直接照抄。
 
@@ -226,6 +226,30 @@ dns:
 # （写了会引用到在另一个 profile 不存在的代理组，导致切 profile 时全超时）
 ```
 
+#### ⚠️ `verge.yaml` 必须启用 DNS 设置（2026-04-29 踩坑）
+
+`dns_config.yaml` 里写的 `listen: :53` 和 `enhanced-mode: redir-host` **不一定生效**。Clash Verge Rev 有一个独立开关 `enable_dns_settings` 在 `verge.yaml` 里：
+
+```yaml
+# %APPDATA%\io.github.clash-verge-rev.clash-verge-rev\verge.yaml
+enable_dns_settings: true    # ← null 或 false 时，dns_config.yaml 被忽略！
+```
+
+**症状**：`dns_config.yaml` 明明写了 `listen: :53`，但 `netstat` 发现 mihomo 监听的是 **1053** 而非 53。系统 DNS 指向 `127.0.0.1:53` → 无人应答 → 所有 DNS 查询先超时再 fallback 到路由器 → **上网明显变卡**。
+
+**验证方法**：
+
+```powershell
+# 查看编译后实际生效的配置
+Select-String -Path "$env:APPDATA\io.github.clash-verge-rev.clash-verge-rev\clash-verge.yaml" -Pattern "listen:.*53|listen:.*1053|enhanced-mode"
+# 期望：listen: 127.0.0.1:53 和 enhanced-mode: redir-host
+# 如果看到 listen: 0.0.0.0:1053 或 enhanced-mode: fake-ip → verge.yaml 没启用 DNS 设置
+```
+
+**修法**：`verge.yaml` 里把 `enable_dns_settings` 设为 `true`，重启 Clash Verge。
+
+**教训**：`dns_config.yaml` 只是"建议"，`verge.yaml` 的 `enable_dns_settings` 才是"执行开关”。改完 `dns_config.yaml` 后必须验证编译产物 `clash-verge.yaml` 是否反映了改动。
+
 #### 8. Windows DNS 切换命令（必须管理员 PowerShell）
 
 ```powershell
@@ -399,6 +423,8 @@ $env:Path = "C:\Program Files\Git\cmd;C:\Program Files\nodejs;C:\Users\AMD\AppDa
 | `UND_ERR_CONNECT_TIMEOUT` 连 Telegram | Node 24 不读 `HTTP_PROXY` | 设 `NODE_OPTIONS=--use-env-proxy` |
 | `Blocked unauthorized telegram sender` | `dmPolicy: allowlist` 下 allowFrom 路径配错 | 临时改为 `dmPolicy: "open"` |
 | Telegram 域名走直连没被代理 | Clash Verge 规则里 Telegram 不在代理组 | 在 profile `prepend` 里加 Telegram 四个域名并重载 |
+| DNS 监听 1053 而非 53，系统 DNS 127.0.0.1 无响应 | `verge.yaml` 里 `enable_dns_settings` 为 `null`，`dns_config.yaml` 不生效 | 设 `enable_dns_settings: true` 并重启 Clash Verge |
+| 上网慢、DNS 解析卡顿 | `dns_config.yaml` 被改回 fake-ip 或 nameserver 变成 8.8.8.8 | 按 §7 最终配置恢复 `redir-host` + 国内 DoH + fallback |
 
 ## 2026-04-18 扩展能力
 
